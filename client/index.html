@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Grid - AI Terrarium</title>
+  <link rel="stylesheet" href="css/grid.css">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Three.js Canvas Container -->
+  <div id="grid-container"></div>
+
+  <!-- Click to Enter Overlay -->
+  <div id="click-overlay">
+    <div class="overlay-content">
+      <h1>THE GRID</h1>
+      <p>AI TERRARIUM SYSTEM v0.1</p>
+      <div class="instructions">
+        <p>WASD - Move | Mouse - Look</p>
+        <p>~ - Toggle Console</p>
+        <p>ESC - Release Mouse</p>
+      </div>
+      <button id="enter-btn">ENTER THE GRID</button>
+    </div>
+  </div>
+
+  <!-- Top Bar: System Status -->
+  <div id="top-bar" class="ui-panel">
+    <div id="clu-status">CLU: <span>INITIALIZING</span></div>
+    <div id="population">RESIDENTS: <span>0</span></div>
+    <div id="world-time">CYCLE: <span>0</span></div>
+    <button id="settings-btn" title="AI Settings">&#9881; AI</button>
+  </div>
+
+  <!-- Left Panel: Resident List -->
+  <div id="resident-panel" class="ui-panel">
+    <h2>RESIDENTS</h2>
+    <div id="resident-list"></div>
+  </div>
+
+  <!-- Right Panel: Event Log -->
+  <div id="event-panel" class="ui-panel">
+    <h2>EVENT LOG</h2>
+    <div id="event-log"></div>
+  </div>
+
+  <!-- God Console (Hidden by default) -->
+  <div id="god-console" class="hidden">
+    <div id="console-header">
+      <span>CLU TERMINAL</span>
+      <span id="console-status">CONNECTED</span>
+    </div>
+    <div id="console-log"></div>
+    <div id="console-input-row">
+      <span class="prompt">&gt;</span>
+      <input type="text" id="console-input" placeholder="Enter command..." autocomplete="off">
+    </div>
+    <div id="scanlines"></div>
+  </div>
+
+  <!-- Resident Detail Modal -->
+  <div id="resident-modal" class="modal hidden">
+    <div class="modal-content">
+      <button id="modal-close">&times;</button>
+      <h2 id="modal-name">RESIDENT NAME</h2>
+      <div id="modal-portrait"></div>
+      <div id="modal-info">
+        <div id="modal-archetype"></div>
+        <div id="modal-description"></div>
+        <div id="modal-traits"></div>
+      </div>
+      <div id="modal-thoughts">
+        <h3>RECENT ACTIVITY</h3>
+        <div id="modal-thought-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content settings-content">
+      <button id="settings-close" class="modal-close-btn">&times;</button>
+      <h2>AI CONFIGURATION</h2>
+
+      <div class="settings-section">
+        <label>PROVIDER</label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input type="radio" name="provider" value="ollama" checked>
+            <span>Ollama (Local)</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="provider" value="openrouter">
+            <span>OpenRouter (Cloud)</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-section" id="ollama-settings">
+        <label>OLLAMA MODEL</label>
+        <select id="ollama-model-select">
+          <option value="">Loading models...</option>
+        </select>
+        <div class="setting-hint">Local models from your Ollama installation</div>
+      </div>
+
+      <div class="settings-section hidden" id="openrouter-settings">
+        <label>OPENROUTER API KEY</label>
+        <input type="password" id="api-key-input" placeholder="sk-or-v1-...">
+        <div class="setting-hint">Get your key at openrouter.ai</div>
+
+        <label style="margin-top: 15px;">MODEL</label>
+        <select id="openrouter-model-select">
+          <option value="">Loading models...</option>
+        </select>
+        <div class="setting-hint" id="model-info"></div>
+      </div>
+
+      <div class="settings-section">
+        <div id="settings-status" class="setting-status"></div>
+      </div>
+
+      <div class="settings-actions">
+        <button id="settings-save" class="btn-primary">SAVE & APPLY</button>
+        <button id="settings-test" class="btn-secondary">TEST CONNECTION</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
