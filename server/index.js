@@ -5,7 +5,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { WorldState } from './orchestrator/WorldState.js';
-import { CluService } from './orchestrator/CluService.js';
+import { CluBrain } from './orchestrator/CluBrain.js';
+import { CluService } from './orchestrator/CluService.js'; // Keep for API compatibility
+import { SpatialTools } from './orchestrator/SpatialTools.js';
+import { ActionExecutor } from './orchestrator/ActionExecutor.js';
 import { ResidentRunner } from './orchestrator/ResidentRunner.js';
 import { SoulGenerator } from './soul-generator/SoulGenerator.js';
 import { TIMING, WORLD } from './config/models.js';
@@ -20,11 +23,16 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../client')));
 
-// Initialize systems - useMock: false enables live Ollama AI
+// Initialize systems
 const worldState = new WorldState();
-const clu = new CluService({ useMock: false });
+const cluBrain = new CluBrain(); // New persistent brain
+const cluService = new CluService({ useMock: false }); // Keep for API compat
 const residentRunner = new ResidentRunner({ useMock: false });
-const soulGenerator = new SoulGenerator({ useMock: true }); // Keep mock for faster spawning
+const soulGenerator = new SoulGenerator({ useMock: true });
+
+// These get initialized after worldState.init()
+let spatialTools = null;
+let actionExecutor = null;
 
 // WebSocket clients
 const wsClients = new Set();
@@ -32,7 +40,7 @@ const wsClients = new Set();
 function broadcast(data) {
   const message = JSON.stringify(data);
   wsClients.forEach(client => {
-    if (client.readyState === 1) { // WebSocket.OPEN
+    if (client.readyState === 1) {
       client.send(message);
     }
   });
@@ -80,35 +88,34 @@ app.get('/api/events', (req, res) => {
   }
 });
 
-app.post('/api/user-message', async (req, res) => {
+// Get the current map view
+app.get('/api/map', (req, res) => {
   try {
-    const { message } = req.body;
-    if (!message) {
-      return res.status(400).json({ error: 'Message required' });
-    }
-
-    // Log the message as an event
-    worldState.logEvent('user_message', { message, timestamp: Date.now() });
-
-    // Process through CLU
-    const response = await clu.processUserMessage(message);
-
-    // Broadcast to all clients
-    broadcast({
-      type: 'user_message',
-      data: { message, response }
-    });
-
-    res.json(response);
+    const radius = parseInt(req.query.radius) || 5;
+    const map = spatialTools.generateMap({ x: 0, z: 0 }, radius);
+    res.json({ map, gridSize: spatialTools.gridSize });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Settings API
+// Get structures
+app.get('/api/structures', (req, res) => {
+  try {
+    const structures = spatialTools.getStructuresNear(0, 0, 200);
+    res.json(structures);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Settings API - now manages both CluBrain and CluService
 app.get('/api/settings', (req, res) => {
   try {
-    res.json(clu.getSettings());
+    res.json({
+      ...cluBrain.getSettings(),
+      ...cluService.getSettings()
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -117,7 +124,9 @@ app.get('/api/settings', (req, res) => {
 app.post('/api/settings', (req, res) => {
   try {
     const { provider, apiKey, model } = req.body;
-    const settings = clu.configure({ provider, apiKey, model, useMock: false });
+    // Configure both systems
+    cluBrain.configure({ provider, apiKey, model });
+    const settings = cluService.configure({ provider, apiKey, model, useMock: false });
     res.json({ success: true, settings });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -127,21 +136,19 @@ app.post('/api/settings', (req, res) => {
 // Get available Ollama models
 app.get('/api/ollama-models', async (req, res) => {
   try {
-    const response = await fetch(`${clu.ollamaHost}/api/tags`);
+    const response = await fetch(`${cluService.ollamaHost}/api/tags`);
     const data = await response.json();
     res.json(data.models || []);
   } catch (error) {
-    res.json([]); // Return empty if Ollama not available
+    res.json([]);
   }
 });
 
-// Get available OpenRouter models (live from API)
+// Get available OpenRouter models
 app.get('/api/openrouter-models', async (req, res) => {
   try {
     const response = await fetch('https://openrouter.ai/api/v1/models');
     const data = await response.json();
-
-    // Filter and organize models - include all models
     const models = data.data
       .map(m => ({
         id: m.id,
@@ -150,7 +157,6 @@ app.get('/api/openrouter-models', async (req, res) => {
         pricing: m.pricing
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
-
     res.json(models);
   } catch (error) {
     console.error('[OpenRouter] Failed to fetch models:', error.message);
@@ -158,88 +164,117 @@ app.get('/api/openrouter-models', async (req, res) => {
   }
 });
 
+// Get CLU's current state (goals, pending actions, etc)
+app.get('/api/clu/state', (req, res) => {
+  try {
+    res.json({
+      goals: cluBrain.goals,
+      pendingActions: cluBrain.pendingActions.length,
+      residentInstructions: Object.fromEntries(cluBrain.residentInstructions),
+      recentMemories: cluBrain.memory.worldObservations.slice(-10),
+      conversationHistory: cluBrain.conversationHistory.slice(-5)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Console/command endpoint - the main interface
 app.post('/api/console', async (req, res) => {
   try {
     const { command } = req.body;
-
-    // Log all console commands
     console.log(`[Console] Command: "${command}"`);
 
-    // Handle console commands
     let response;
     const cmd = command.toLowerCase().trim();
 
+    // Built-in commands
     if (cmd === 'status' || cmd === 'status report') {
-      response = await clu.getStatusReport();
+      const snapshot = worldState.getWorldSnapshot();
+      const map = spatialTools.generateMap({ x: 0, z: 0 }, 3);
+      response = `CLU: Grid Status Report
+Population: ${snapshot.population}
+Active Goals: ${cluBrain.goals.filter(g => g.status === 'active').length}
+Pending Actions: ${cluBrain.pendingActions.length}
+
+Map:
+${map}`;
     } else if (cmd === 'help') {
       response = `CLU: Available commands:
 - status: Grid status report
 - residents: List all residents
 - spawn: Create a new resident
-- mock [on/off]: Toggle mock/live AI mode
-- instruct <text>: Give CLU an instruction
-- say <text>: Broadcast message to Grid
-- clear: Clear console display`;
+- build <type>: Build a structure (beacon, wall, platform, obelisk, gateway, arena)
+- gather: Call residents to center
+- think: Force CLU to think cycle
+- goals: Show active goals
+- map: Display grid map
+Or just talk to me naturally.`;
     } else if (cmd === 'residents') {
       const residents = worldState.getAllResidents();
-      response = `CLU: ${residents.length} residents active:\n` +
-        residents.map(r => `  - ${r.soul_card.name} [${r.state}]`).join('\n');
+      response = `CLU: ${residents.length} residents in the Grid:\n` +
+        residents.map(r =>
+          `  - ${r.soul_card.name} at ${spatialTools.worldToGrid(r.position.x, r.position.z)} [${r.state}]`
+        ).join('\n');
     } else if (cmd === 'spawn') {
       const soul = await soulGenerator.generate({});
       worldState.addResident(soul);
       broadcast({ type: 'resident_spawned', data: soul });
-      response = `CLU: New resident initialized: ${soul.name}`;
-    } else if (cmd.startsWith('mock')) {
-      const mode = cmd.includes('off') ? false : true;
-      clu.setMockMode(mode);
-      residentRunner.setMockMode(mode);
-      soulGenerator.setMockMode(mode);
-      response = `CLU: Mock mode ${mode ? 'ENABLED' : 'DISABLED'}. ${mode ? 'Using hardcoded responses.' : 'Using Ollama AI.'}`;
-    } else if (cmd.startsWith('instruct ')) {
-      // Direct instruction to CLU
-      const instruction = command.substring(9).trim();
-      const result = await clu.processInstruction(instruction);
-      response = result.response;
+      cluBrain.recordEvent('spawn', { name: soul.name, reason: 'user_command' });
+      response = `CLU: New program initialized: ${soul.name}`;
+    } else if (cmd === 'think') {
+      const thoughts = await cluBrain.think();
+      response = `CLU: *contemplates*\n${thoughts ?
+        `Observation: ${thoughts.thoughts.observation || 'None'}\nMood: ${thoughts.thoughts.mood}` :
+        'My thoughts are unclear.'}`;
+    } else if (cmd === 'goals') {
+      const activeGoals = cluBrain.goals.filter(g => g.status === 'active');
+      response = `CLU: Active goals (${activeGoals.length}):\n` +
+        (activeGoals.map(g => `  - ${g.description}`).join('\n') || '  None');
+    } else if (cmd === 'map') {
+      const map = spatialTools.generateMap({ x: 0, z: 0 }, 5);
+      response = `CLU: Current Grid layout:\n${map}`;
+    } else if (cmd === 'gather') {
+      const result = await actionExecutor.execute({ action: 'gather', params: {} });
+      response = result.success ?
+        `CLU: I call all programs to assemble. ${result.residentsAffected} responding.` :
+        `CLU: ${result.error}`;
+    } else if (cmd.startsWith('build ')) {
+      const type = command.substring(6).trim().toLowerCase();
+      const result = await actionExecutor.execute({
+        action: 'build',
+        params: { type, near: 'center' }
+      });
+      response = result.success ?
+        `CLU: ${result.template.name} constructed at ${result.gridRef}.` :
+        `CLU: Construction failed: ${result.error}`;
 
-      // Execute any immediate actions
-      if (result.action) {
-        await executeAction(result.action);
-      }
-
-      // Log the instruction
-      worldState.logEvent('instruction', { instruction, response: result.response });
-      broadcast({ type: 'clu_instruction', data: { instruction, response: result.response } });
-    } else if (cmd.startsWith('say ')) {
-      // Broadcast message to the Grid (residents can hear)
-      const message = command.substring(4).trim();
-      const result = await clu.processUserMessage(message);
-      response = result.cluResponse;
-
-      // Log and broadcast
-      worldState.logEvent('user_broadcast', { message, response: result.cluResponse });
-      broadcast({ type: 'world_event', data: { type: 'voice', message: `A voice echoes: "${message}"` } });
-    } else if (cmd === 'ai status') {
-      // Check AI connectivity
-      const mockStatus = clu.useMock ? 'MOCK (hardcoded)' : 'LIVE (Ollama)';
-      response = `CLU: AI Mode: ${mockStatus}\nModel: ${clu.model}\nHost: ${clu.ollamaHost}`;
-    } else if (cmd.startsWith('do ') || cmd.startsWith('make ') || cmd.startsWith('create ')) {
-      // Action-oriented commands go through instruction processing
-      const result = await clu.processInstruction(command);
-      response = result.response;
-
-      if (result.action) {
-        await executeAction(result.action);
+      if (result.success) {
+        broadcast({ type: 'structure_built', data: result });
       }
     } else {
-      // Default: conversational chat with CLU
-      response = await clu.chat(command);
+      // Natural language - send to CluBrain for conversation
+      const result = await cluBrain.processCommand(command);
+      response = result.response;
+
+      // Execute any action that came from the conversation
+      if (result.action) {
+        const actionResult = await actionExecutor.execute(result.action);
+        if (actionResult.success) {
+          cluBrain.recordEvent('action_executed', {
+            action: result.action.action,
+            result: actionResult
+          });
+        }
+      }
     }
 
-    // Log console interaction
+    // Log and respond
     worldState.logEvent('console_command', { command, response });
-
     res.json({ response });
+
   } catch (error) {
+    console.error('[Console] Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -256,7 +291,6 @@ wss.on('connection', (ws) => {
   console.log('[WebSocket] Client connected');
   wsClients.add(ws);
 
-  // Send current state to new client
   ws.send(JSON.stringify({
     type: 'init',
     data: worldState.getWorldSnapshot()
@@ -284,68 +318,47 @@ let simulationRunning = false;
 let cycleCount = 0;
 
 /**
- * Execute an action from CLU's instruction processing
+ * CLU's thinking loop - runs independently
  */
-async function executeAction(action) {
-  if (!action || !action.type) return;
+async function cluThinkLoop() {
+  if (!simulationRunning) return;
 
-  console.log(`[Action] Executing: ${action.type}`, action.params || '');
+  try {
+    console.log('[CluBrain] Thinking...');
+    const result = await cluBrain.think();
 
-  switch (action.type) {
-    case 'queue_spawn':
-    case 'spawn_resident': {
-      const soul = await soulGenerator.generate(action.params || {});
-      const resident = worldState.addResident(soul);
-      broadcast({ type: 'resident_spawned', data: resident });
-      worldState.logEvent('resident_spawned', { id: soul.id, name: soul.name, reason: 'user_instruction' });
-      break;
-    }
-
-    case 'gather_residents': {
-      // Move all residents toward center
-      const residents = worldState.getAllResidents();
-      const target = action.params?.target || { x: 0, z: 0 };
-      residents.forEach(r => {
-        const dx = target.x - r.position.x;
-        const dz = target.z - r.position.z;
-        const dir = Math.abs(dx) > Math.abs(dz)
-          ? (dx > 0 ? 'east' : 'west')
-          : (dz > 0 ? 'south' : 'north');
-        worldState.moveResident(r.id, { direction: dir, distance: 3 });
-        broadcast({ type: 'resident_moved', data: { id: r.id, position: worldState.getResidentPosition(r.id) } });
+    if (result && result.thoughts) {
+      // Broadcast CLU's mood/state
+      broadcast({
+        type: 'clu_thought',
+        data: {
+          cycle: cycleCount,
+          mood: result.thoughts.mood,
+          observation: result.thoughts.observation,
+          activeGoals: result.activeGoals,
+          pendingActions: result.pendingActions
+        }
       });
-      break;
-    }
 
-    case 'broadcast_event': {
-      const message = action.params?.message || 'CLU speaks to the Grid.';
-      worldState.logEvent('clu_broadcast', { message });
-      broadcast({ type: 'world_event', data: { type: 'clu_voice', message } });
-      break;
-    }
-
-    case 'direct_resident': {
-      // Direct a specific resident to do something
-      if (action.params?.residentId) {
-        const resident = worldState.getResident(action.params.residentId);
-        if (resident) {
-          // Queue this as a special instruction for the resident's next turn
-          worldState.logEvent('resident_directive', {
-            residentId: action.params.residentId,
-            directive: action.params.directive
-          });
+      // Execute any pending actions
+      while (cluBrain.pendingActions.length > 0) {
+        const action = cluBrain.getNextAction();
+        if (action) {
+          const actionResult = await actionExecutor.execute(action);
+          console.log(`[CluBrain] Executed action:`, action.action, actionResult.success);
         }
       }
-      break;
     }
-
-    default:
-      console.log(`[Action] Unknown action type: ${action.type}`);
+  } catch (error) {
+    console.error('[CluBrain] Think error:', error.message);
   }
+
+  // Schedule next think cycle
+  setTimeout(cluThinkLoop, cluBrain.thinkInterval);
 }
 
 /**
- * Main simulation loop
+ * Main simulation loop - handles resident turns
  */
 async function simulationLoop() {
   if (!simulationRunning) return;
@@ -354,30 +367,11 @@ async function simulationLoop() {
   console.log(`[Simulation] Cycle ${cycleCount}`);
 
   try {
-    // 1. CLU observes and decides
-    const cluDecision = await clu.tick();
-    broadcast({
-      type: 'clu_tick',
-      data: { cycle: cycleCount, decision: cluDecision }
-    });
-
-    // 2. Process CLU's decisions
-    for (const decision of cluDecision.decisions) {
-      if (decision.type === 'spawn_resident') {
-        const soul = await soulGenerator.generate(decision.params);
-        const resident = worldState.addResident(soul);
-        broadcast({ type: 'resident_spawned', data: resident });
-        worldState.logEvent('resident_spawned', { id: soul.id, name: soul.name });
-      }
-
-      if (decision.type === 'next_actor') {
-        await runResidentTurn(decision.residentId);
-      }
-
-      if (decision.type === 'event') {
-        worldState.logEvent(decision.event.type, decision.event);
-        broadcast({ type: 'world_event', data: decision.event });
-      }
+    // Pick a resident to act (round-robin or random)
+    const residents = worldState.getAllResidents();
+    if (residents.length > 0) {
+      const activeResident = residents[cycleCount % residents.length];
+      await runResidentTurn(activeResident.id);
     }
 
   } catch (error) {
@@ -385,8 +379,8 @@ async function simulationLoop() {
     worldState.logEvent('error', { message: error.message });
   }
 
-  // Schedule next tick
-  setTimeout(simulationLoop, clu.tickInterval);
+  // Schedule next simulation tick
+  setTimeout(simulationLoop, TIMING.cluTickInterval);
 }
 
 /**
@@ -394,14 +388,14 @@ async function simulationLoop() {
  */
 async function runResidentTurn(residentId) {
   const residentData = worldState.getResident(residentId);
-  if (!residentData) {
-    console.warn(`[Simulation] Resident ${residentId} not found`);
-    return;
-  }
+  if (!residentData) return;
 
   const soul = residentData.soul_card;
   const memories = worldState.getMemories(residentId);
   const perception = worldState.getPerception(residentId);
+
+  // Check if CLU has instructions for this resident
+  const cluInstruction = cluBrain.getResidentInstruction(residentId);
 
   broadcast({
     type: 'resident_turn_start',
@@ -410,6 +404,13 @@ async function runResidentTurn(residentId) {
 
   try {
     await residentRunner.loadResident(soul, memories);
+
+    // Add CLU instruction to perception if present
+    if (cluInstruction) {
+      perception.cluDirective = cluInstruction.instruction;
+      console.log(`[Resident] ${soul.name} received directive: ${cluInstruction.instruction}`);
+    }
+
     const turn = await residentRunner.runTurn(perception);
     await residentRunner.unloadResident();
 
@@ -430,6 +431,8 @@ async function runResidentTurn(residentId) {
         type: 'resident_speech',
         data: { id: residentId, name: soul.name, text: turn.speech }
       });
+      // Record in CLU's memory
+      cluBrain.recordEvent('speech', { resident: soul.name, text: turn.speech });
     }
 
     if (turn.action) {
@@ -440,7 +443,6 @@ async function runResidentTurn(residentId) {
       });
     }
 
-    // Store thought as memory
     if (turn.inner_thought) {
       const compressed = residentRunner.compressMemories(turn.inner_thought);
       worldState.addMemory(residentId, compressed);
@@ -465,7 +467,14 @@ async function startSimulation() {
   console.log('[Simulation] Initializing...');
 
   await worldState.init();
-  await clu.initialize(worldState);
+
+  // Initialize spatial tools and action executor
+  spatialTools = new SpatialTools(worldState);
+  actionExecutor = new ActionExecutor(worldState, spatialTools, broadcast);
+
+  // Initialize both CLU systems
+  await cluBrain.initialize(worldState);
+  await cluService.initialize(worldState);
 
   // Spawn initial residents if empty
   const currentResidents = worldState.getAllResidents();
@@ -482,7 +491,11 @@ async function startSimulation() {
 
   simulationRunning = true;
   console.log('[Simulation] Starting main loop');
+  console.log('[CluBrain] Starting thinking loop');
+
+  // Start both loops
   simulationLoop();
+  setTimeout(cluThinkLoop, 5000); // Start CLU thinking after 5 seconds
 }
 
 // Start everything
@@ -495,6 +508,7 @@ startSimulation().catch(err => {
 process.on('SIGINT', () => {
   console.log('\n[Server] Shutting down...');
   simulationRunning = false;
+  cluBrain.saveState();
   worldState.close();
   server.close(() => {
     console.log('[Server] Goodbye.');
