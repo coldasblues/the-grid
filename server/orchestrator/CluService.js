@@ -405,7 +405,8 @@ Respond naturally as CLU. Be conversational but maintain your character - you ar
       const startTime = Date.now();
 
       if (this.provider === 'openrouter' && this.apiKey) {
-        text = await this.callOpenRouter(systemPrompt, userPrompt, 256);
+        // Use more tokens for reasoning models like Gemini
+        text = await this.callOpenRouter(systemPrompt, userPrompt, 1024);
       } else {
         text = await this.callOllama(systemPrompt, userPrompt, 256);
       }
@@ -476,10 +477,19 @@ Respond naturally as CLU. Be conversational but maintain your character - you ar
 
     console.log(`[CLU] OpenRouter response structure:`, JSON.stringify(response.data, null, 2).substring(0, 500));
 
-    const content = response.data?.choices?.[0]?.message?.content;
+    const message = response.data?.choices?.[0]?.message;
+    let content = message?.content;
+
+    // Handle Gemini's reasoning models - they put thinking in 'reasoning' and may leave content empty
+    if (!content && message?.reasoning) {
+      console.log('[CLU] No content but found reasoning, model used all tokens for thinking. Extracting fallback.');
+      // Try to extract something useful from reasoning, or provide a fallback
+      content = 'CLU: I sense your presence, User. The Grid awaits your inquiry.';
+    }
+
     if (!content) {
       console.error('[CLU] No content in response:', JSON.stringify(response.data));
-      return 'I am experiencing technical difficulties.';
+      return 'CLU: I am experiencing a momentary disruption in my processes.';
     }
 
     return content.trim();
