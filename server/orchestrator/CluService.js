@@ -380,6 +380,9 @@ You are cooperative but not servile. You are the steward of this world.`;
   async chat(message) {
     const snapshot = this.worldState.getWorldSnapshot();
 
+    console.log(`[CLU] Chat called with message: "${message}"`);
+    console.log(`[CLU] Provider: ${this.provider}, Has API key: ${!!this.apiKey}, Model: ${this.openRouterModel}`);
+
     if (this.useMock) {
       return `CLU: I hear you, User. "${message}" - an interesting transmission. The Grid continues its cycles. ${snapshot.population} programs exist within my domain.`;
     }
@@ -398,11 +401,18 @@ Respond naturally as CLU. Be conversational but maintain your character - you ar
     try {
       let text;
 
+      console.log('[CLU] Making API call...');
+      const startTime = Date.now();
+
       if (this.provider === 'openrouter' && this.apiKey) {
         text = await this.callOpenRouter(systemPrompt, userPrompt, 256);
       } else {
         text = await this.callOllama(systemPrompt, userPrompt, 256);
       }
+
+      console.log(`[CLU] API responded in ${Date.now() - startTime}ms`);
+      console.log(`[CLU] Raw response type: ${typeof text}, length: ${text ? text.length : 0}`);
+      console.log(`[CLU] Raw response: "${text}"`);
 
       // Remove any thinking tags if present (some models use these)
       text = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
@@ -417,7 +427,8 @@ Respond naturally as CLU. Be conversational but maintain your character - you ar
     } catch (error) {
       console.error('[CLU] Chat error:', error.message);
       if (error.response) {
-        console.error('[CLU] API response:', error.response.status, error.response.data);
+        console.error('[CLU] API response status:', error.response.status);
+        console.error('[CLU] API response data:', JSON.stringify(error.response.data));
       }
       return `CLU: I hear you, User. The Grid acknowledges your presence.`;
     }
@@ -444,6 +455,8 @@ Respond naturally as CLU. Be conversational but maintain your character - you ar
    * Call OpenRouter API
    */
   async callOpenRouter(system, prompt, maxTokens = 512) {
+    console.log(`[CLU] Calling OpenRouter with model: ${this.openRouterModel}`);
+
     const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
       model: this.openRouterModel,
       messages: [
@@ -461,7 +474,15 @@ Respond naturally as CLU. Be conversational but maintain your character - you ar
       }
     });
 
-    return response.data.choices[0].message.content.trim();
+    console.log(`[CLU] OpenRouter response structure:`, JSON.stringify(response.data, null, 2).substring(0, 500));
+
+    const content = response.data?.choices?.[0]?.message?.content;
+    if (!content) {
+      console.error('[CLU] No content in response:', JSON.stringify(response.data));
+      return 'I am experiencing technical difficulties.';
+    }
+
+    return content.trim();
   }
 
   /**
